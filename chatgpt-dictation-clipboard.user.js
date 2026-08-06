@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Dictation Clipboard
 // @namespace    https://github.com/
-// @version      0.3.1
+// @version      0.4.0
 // @description  Copies ChatGPT dictation to the clipboard, clears the input, and plays a sound when it is ready.
 // @author       Egorrko
 // @match        https://chatgpt.com/*
@@ -9,7 +9,6 @@
 // @grant        GM_setClipboard
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @grant        unsafeWindow
 // @run-at       document-start
 // ==/UserScript==
 
@@ -38,22 +37,16 @@
   const TEXT_STABLE_MS = 100;
   const CHECK_INTERVAL_MS = 50;
 
-  const TRANSCRIPTION_TIMEOUT_MS = 120_000;
+  // ChatGPT usually fills the input a second or two after the dictation
+  // stops. A short timeout keeps a desynced state from hanging for minutes.
+  const TRANSCRIPTION_TIMEOUT_MS = 15_000;
   const HOTKEY_DEBOUNCE_MS = 600;
-
-  // How long ChatGPT gets to actually start or stop the dictation
-  // before the hotkey is reported as ignored.
-  const DICTATION_CONFIRM_MS = 1500;
-  const MIC_POLL_MS = 250;
-
-  const pageWindow = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
 
   let enabled = GM_getValue(SETTINGS_KEY, true);
   let recording = false;
   let textBeforeRecording = "";
   let operationId = 0;
   let lastHotkeyAt = 0;
-  let warnedUnconfirmed = false;
   let audioContext = null;
 
   let host;
@@ -389,11 +382,17 @@
       await sleep(CHECK_INTERVAL_MS);
     }
 
-    setStatus("Transcription not found", "error");
+    setStatus("No transcription", "error");
     showToast(
-      "Recording stopped, but no new text appeared in the ChatGPT input.",
+      "No new text appeared in the ChatGPT input. If ChatGPT was still recording, press the shortcut again.",
       true
     );
+
+    setTimeout(() => {
+      if (enabled && !recording) {
+        setStatus("Ready", "ready");
+      }
+    }, 2500);
   }
 
   function handleRecordingStart() {
@@ -420,85 +419,6 @@
       }
     );
   }
-
-  /*
-   * The recording state prefers the microphone stream ChatGPT opens over the
-   * hotkey, so it cannot drift out of sync when ChatGPT ignores the shortcut.
-   * If no stream shows up in time, the hotkey falls back to toggling blindly.
-   */
-  function watchMicStream(stream) {
-    const tracks = stream.getAudioTracks();
-
-    if (!tracks.length) {
-      return;
-    }
-
-    log("MIC STREAM", { tracks: tracks.length, alreadyRecording: recording });
-
-    if (!recording) {
-      handleRecordingStart();
-    }
-
-    let finished = false;
-
-    const finish = () => {
-      if (finished) {
-        return;
-      }
-
-      finished = true;
-      clearInterval(poll);
-
-      if (recording) {
-        handleRecordingStop();
-      }
-    };
-
-    // ponytail: polling covers streams ChatGPT drops without stopping tracks;
-    // drop it if track.stop() alone turns out to be reliable.
-    const poll = setInterval(() => {
-      if (tracks.every((track) => track.readyState !== "live" || !track.enabled)) {
-        finish();
-      }
-    }, MIC_POLL_MS);
-
-    tracks.forEach((track) => {
-      track.addEventListener("ended", finish);
-
-      const nativeStop = track.stop.bind(track);
-
-      track.stop = () => {
-        nativeStop();
-        finish();
-      };
-    });
-  }
-
-  function watchDictationMic() {
-    const mediaDevices = pageWindow.navigator?.mediaDevices;
-
-    if (!mediaDevices?.getUserMedia) {
-      log("MIC WATCH FAILED: mediaDevices unavailable");
-      return false;
-    }
-
-    const original = mediaDevices.getUserMedia.bind(mediaDevices);
-
-    mediaDevices.getUserMedia = function (constraints) {
-      const request = original(constraints);
-      log("getUserMedia", constraints);
-
-      if (constraints?.audio) {
-        request.then((stream) => watchMicStream(stream)).catch(() => {});
-      }
-
-      return request;
-    };
-
-    return true;
-  }
-
-  const micWatched = watchDictationMic();
 
   function isDictationHotkey(event) {
     return (
@@ -559,32 +479,11 @@
         replayAsLatin();
       }
 
-      const wasRecording = recording;
-
-      setTimeout(() => {
-        if (!enabled || recording !== wasRecording) {
-          return;
-        }
-
-        // No microphone activity: either the hook missed the stream or ChatGPT
-        // ignored the shortcut. Toggle blindly and mark the state as a guess.
-        log("HOTKEY UNCONFIRMED: no microphone activity");
-
-        if (recording) {
-          handleRecordingStop();
-        } else {
-          handleRecordingStart();
-          setStatus("Recording · unconfirmed", "recording");
-        }
-
-        if (!warnedUnconfirmed) {
-          warnedUnconfirmed = true;
-          showToast(
-            "ChatGPT did not report microphone activity, so the state is a guess. If nothing was dictated, press the shortcut again.",
-            true
-          );
-        }
-      }, DICTATION_CONFIRM_MS);
+      if (recording) {
+        handleRecordingStop();
+      } else {
+        handleRecordingStart();
+      }
     },
     true
   );
@@ -955,8 +854,10 @@
       enabled = !enabled;
       GM_setValue(SETTINGS_KEY, enabled);
 
-      // Cancels a pending wait; `recording` stays owned by the mic watcher.
+      // Doubles as a state reset: cancels a pending wait and clears the
+      // recording flag if it ever gets out of sync with ChatGPT.
       operationId += 1;
+      recording = false;
 
       updateToggle();
       showToast(enabled ? "Auto-copy enabled." : "Auto-copy disabled.");
@@ -986,10 +887,6 @@
 
     const shortcut = document.createElement("kbd");
     shortcut.textContent = "Ctrl + Shift + D";
-
-    const micValue = document.createElement("span");
-    micValue.textContent = micWatched ? "Watching microphone" : "Hook failed";
-    micValue.classList.toggle("warn", !micWatched);
 
     const timing = document.createElement("span");
     timing.className = "mono";
@@ -1027,7 +924,6 @@
 
     body.append(
       makeRow("Shortcut", shortcut),
-      makeRow("State source", micValue),
       makeRow("Timing", timing),
       copyNowButton,
       hint
@@ -1072,7 +968,6 @@
 
     log("SCRIPT LOADED", {
       enabled,
-      micWatched,
       composerFound: Boolean(getComposer()),
       timing: {
         textStableMs: TEXT_STABLE_MS,
@@ -1080,16 +975,9 @@
       },
     });
 
-    showToast(
-      micWatched
-        ? "Dictation Clipboard is ready."
-        : "Dictation Clipboard cannot watch the microphone in this browser.",
-      !micWatched
-    );
+    showToast("Dictation Clipboard is ready.");
   }
 
-  // The script runs at document-start so the microphone hook is installed
-  // before ChatGPT can request a stream.
   if (document.body) {
     init();
   } else {
