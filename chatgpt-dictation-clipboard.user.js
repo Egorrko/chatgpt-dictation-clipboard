@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Dictation Clipboard
 // @namespace    https://github.com/
-// @version      0.3.0
+// @version      0.3.1
 // @description  Copies ChatGPT dictation to the clipboard, clears the input, and plays a sound when it is ready.
 // @author       Egorrko
 // @match        https://chatgpt.com/*
@@ -53,6 +53,7 @@
   let textBeforeRecording = "";
   let operationId = 0;
   let lastHotkeyAt = 0;
+  let warnedUnconfirmed = false;
   let audioContext = null;
 
   let host;
@@ -421,19 +422,22 @@
   }
 
   /*
-   * The recording state comes from the microphone stream ChatGPT opens,
-   * never from the hotkey. If ChatGPT ignores the shortcut (wrong keyboard
-   * layout, browser shortcut stealing it, UI change), nothing is started here
-   * either, so the state cannot drift out of sync.
+   * The recording state prefers the microphone stream ChatGPT opens over the
+   * hotkey, so it cannot drift out of sync when ChatGPT ignores the shortcut.
+   * If no stream shows up in time, the hotkey falls back to toggling blindly.
    */
   function watchMicStream(stream) {
     const tracks = stream.getAudioTracks();
 
-    if (!tracks.length || recording) {
+    if (!tracks.length) {
       return;
     }
 
-    handleRecordingStart();
+    log("MIC STREAM", { tracks: tracks.length, alreadyRecording: recording });
+
+    if (!recording) {
+      handleRecordingStart();
+    }
 
     let finished = false;
 
@@ -444,7 +448,10 @@
 
       finished = true;
       clearInterval(poll);
-      handleRecordingStop();
+
+      if (recording) {
+        handleRecordingStop();
+      }
     };
 
     // ponytail: polling covers streams ChatGPT drops without stopping tracks;
@@ -479,6 +486,7 @@
 
     mediaDevices.getUserMedia = function (constraints) {
       const request = original(constraints);
+      log("getUserMedia", constraints);
 
       if (constraints?.audio) {
         request.then((stream) => watchMicStream(stream)).catch(() => {});
@@ -528,10 +536,6 @@
         return;
       }
 
-      // Yandex Browser and Chrome bind Ctrl+Shift+D to "bookmark all tabs".
-      // The event still reaches ChatGPT, only the browser action is dropped.
-      event.preventDefault();
-
       unlockAudio();
 
       if (!enabled) {
@@ -547,16 +551,36 @@
       lastHotkeyAt = now;
 
       if (event.key.toLowerCase() !== "d") {
+        // ChatGPT never sees this one anyway, so the browser action
+        // (Yandex/Chrome: "bookmark all tabs") can be dropped safely.
+        // preventDefault() on a Latin "d" would break ChatGPT's own handler,
+        // which ignores events that are already default-prevented.
+        event.preventDefault();
         replayAsLatin();
       }
 
       const wasRecording = recording;
 
       setTimeout(() => {
-        if (enabled && recording === wasRecording) {
-          setStatus("ChatGPT ignored the hotkey", "error");
+        if (!enabled || recording !== wasRecording) {
+          return;
+        }
+
+        // No microphone activity: either the hook missed the stream or ChatGPT
+        // ignored the shortcut. Toggle blindly and mark the state as a guess.
+        log("HOTKEY UNCONFIRMED: no microphone activity");
+
+        if (recording) {
+          handleRecordingStop();
+        } else {
+          handleRecordingStart();
+          setStatus("Recording · unconfirmed", "recording");
+        }
+
+        if (!warnedUnconfirmed) {
+          warnedUnconfirmed = true;
           showToast(
-            "ChatGPT did not react to the shortcut. Use the microphone button in the composer.",
+            "ChatGPT did not report microphone activity, so the state is a guess. If nothing was dictated, press the shortcut again.",
             true
           );
         }
