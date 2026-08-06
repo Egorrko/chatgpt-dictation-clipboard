@@ -29,7 +29,9 @@ Your userscript manager will open an installation page. Click **Install**.
 
 The ChatGPT input is cleared after a successful copy.
 
-The shortcut works on any keyboard layout and no longer triggers the browser's "bookmark all tabs" action. The script tracks the real microphone stream ChatGPT opens, so if ChatGPT does not start the dictation, nothing is copied and a warning is shown instead.
+The shortcut works on any keyboard layout: on a non-Latin one the script replays it as a Latin `d` for ChatGPT and drops the browser's "bookmark all tabs" action.
+
+If no text appears within 15 seconds, a warning is shown and the panel returns to `Ready`. Switching auto-copy off and on again resets the state.
 
 ## Panel
 
