@@ -29,6 +29,12 @@ Your userscript manager will open an installation page. Click **Install**.
 
 The ChatGPT input is cleared after a successful copy.
 
+The shortcut works on any keyboard layout and no longer triggers the browser's "bookmark all tabs" action. The script tracks the real microphone stream ChatGPT opens, so if ChatGPT does not start the dictation, nothing is copied and a warning is shown instead.
+
+## Panel
+
+The panel follows the ChatGPT theme, can be dragged by its header and collapsed into a compact status pill with the chevron. Its position and collapsed state are remembered.
+
 ## Timing
 
 These values control how quickly the transcription is copied:
